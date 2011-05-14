@@ -1,0 +1,59 @@
+#!/bin/sh -e
+
+usage() {
+    echo "ubuild [--config-file=<config>] [-B] <configuration> <package tree> <mode> <output-dir>"
+    echo
+    echo '<mode> = host | target:$arch | toolchain:$arch'
+    echo
+    echo "Configuration is like openinkpot-i386-asimov or iplinux-amd64-zelazny"
+}
+
+while true; do
+    case "$1" in
+        --config-file=*)
+            CONFIG_FILE=${1#--config-file=}
+            shift;;
+        -B)
+            BINARY_ONLY=-B
+            shift;;
+        *)
+            break;;
+    esac
+done
+
+if [ $# -ne 4 ]; then
+    usage
+    exit 1
+fi
+
+CONFIGURATION="$1"
+TREE="$2"
+MODE="$3"
+OUTPUT_DIR="$4"
+
+if [ -n "$CONFIG_FILE" ]; then
+    . $CONFIG_FILE
+else
+    [ -f ubuild.conf ] && . ./ubuild.conf && PATH=$(pwd):$PATH || [ -f /etc/ubuild/ubuild.conf ] && PATH=/etc/ubuild:$PATH || (echo "No config found"; exit 1)
+fi
+
+. ubuild-functions
+
+case "$MODE" in
+    host)
+        pbuildit $BINARY_ONLY "$TREE" "$OUTPUT_DIR"
+        ;;
+    target:*)
+        TARGET_ARCH=${MODE#target:}
+        pbuildit $BINARY_ONLY "$TREE" "$OUTPUT_DIR" "$TARGET_ARCH"
+        ;;
+    toolchain:*)
+        ARCH=${MODE#toolchain:}
+        echo "ERR: Building toolchains is not implemented yet"
+        exit 1
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

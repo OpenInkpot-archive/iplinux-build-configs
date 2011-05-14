@@ -1,0 +1,5 @@
+PATH=/bin:/usr/bin:/home/builder/scripts
+MAILTO=dottedmag
+
+* * * * * ubuild-runner /home/builder/scripts/ubuild.conf
+

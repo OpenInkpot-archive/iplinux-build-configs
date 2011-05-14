@@ -1,0 +1,56 @@
+#!/bin/sh
+set -e
+
+while true; do
+    case "$1" in
+        --config-file=*)
+            CONFIG_ARG=$1
+            CONFIG_FILE=${CONFIG_ARG#--config-file=}
+            shift;;
+        *)
+            break;;
+    esac
+done
+
+if [ $# -ne 3 ]; then
+    usage
+    exit 1
+fi
+
+if [ -n "$CONFIG_FILE" ]; then
+    . $CONFIG_FILE
+else
+    [ -f ubuild.conf ] && . ./ubuild.conf && PATH=$(pwd):$PATH || [ -f /etc/ubuild/ubuild.conf ] && PATH=/etc/ubuild:$PATH || (echo "No config found"; exit 1)
+fi
+
+URI="$1"
+TAG=$(echo "$2" | sed -e 's/:/+/')
+DIR="$3"
+
+CACHE_NAME=$(echo "$URI" | tr ':/.' '___')
+CACHE_DIR="$UBUILD_WORK_DIR/cache/$CACHE_NAME"
+
+if [ -d "$CACHE_DIR" ]; then
+    git clone -o cache -q "$CACHE_DIR" "$DIR"
+else
+    mkdir -p "$DIR"
+    (cd "$DIR" && git init -q)
+fi
+
+(cd "$DIR"
+    git remote add origin "$URI"
+    git fetch -q origin
+    git fetch -q origin --tags
+    if [ $TAG = HEAD ]; then
+        REF=refs/remotes/origin/master
+    else
+        REF="refs/tags/$TAG"
+    fi
+    (git checkout -q build && git reset --hard "$REF") || git checkout -b build "$REF"
+    if [ -d "$CACHE_DIR" ]; then
+        git push cache -f --all
+    else
+        mkdir -p "$CACHE_DIR"
+        rmdir "$CACHE_DIR"
+        git clone --bare -q . "$CACHE_DIR"
+    fi)

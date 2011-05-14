@@ -1,0 +1,149 @@
+#!/bin/sh
+set -e
+
+usage() {
+    echo "ubuild-git [--config-file=<config>] [-B] <outdir> <configuration> <package> <version> <mode>"
+    echo
+    echo '<mode> = host | target:$arch'
+    echo
+    echo "Configuration is like openinkpot-i386-asimov or iplinux-amd64-zelazny"
+}
+
+while true; do
+    case "$1" in
+        --config-file=*)
+            CONFIG_ARG=$1
+            CONFIG_FILE=${CONFIG_ARG#--config-file=}
+            shift;;
+        -B)
+            BINARY_ONLY=-B
+            shift;;
+        *)
+            break;;
+    esac
+done
+
+if [ "x$1" = "x-B" ]; then
+    BINARY_ONLY=-B
+    shift
+fi
+
+if [ $# -ne 5 ]; then
+    usage
+    exit 1
+fi
+
+OUT_DIR=$1
+shift
+
+CONFIGURATION=$1
+PACKAGE="$2"
+VERSION="$3"
+MODE="$4"
+
+SUITE=$(echo $CONFIGURATION | cut -d- -f3-)
+
+if [ -n "$CONFIG_FILE" ]; then
+    . $CONFIG_FILE
+else
+    [ -f ubuild.conf ] && . ./ubuild.conf && PATH=$(pwd):$PATH || [ -f /etc/ubuild/ubuild.conf ] && PATH=/etc/ubuild:$PATH || (echo "No config found"; exit 1)
+fi
+
+in_line_list() {
+    echo "$1" | (
+        while read list_item; do
+            if [ "$2" = "$list_item" ]; then
+                return 0
+            fi
+        done
+        return 1)
+}
+
+control_field() {
+    sed -e '/^$/Q' < "$1/debian/control" | grep "^$2: " | cut -d' ' -f2-
+}
+
+changelog_last_field() {
+    dpkg-parsechangelog -l"$1/debian/changelog" | grep "^$2: " | cut -d' ' -f2-
+}
+
+check_mode() {
+    MODE="$2"
+    SECTION=$(control_field "$1" Section)
+
+    if [ x$(control_field "$1" XCS-Cross-Mode) = "xboth" ]; then
+        return 0
+    fi
+    if [ $MODE = host ] && [ x$SECTION = xhost/tools ]; then
+        return 0
+    fi
+    if [ $MODE != host ] && [ x$SECTION != xhost/tools ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+case "$MODE" in
+    host)
+        ;;
+    target:*)
+        TARGET_ARCH=${MODE#target:}
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
+
+URI="$GIT_BASE$PACKAGE$GIT_SUFFIX"
+TAG="$SUITE/"$(echo $VERSION | sed -e 's/~/./g' -e 's/:/+/g')
+
+TMPDIR=$(mktemp -d)
+cleanup() {
+    RET=$?
+    rm -rf "$TMPDIR"
+    return $RET
+}
+trap cleanup 0 INT TERM QUIT
+
+SRC_DIR="$TMPDIR/build"
+
+ubuild-git-checkout --config-file="$CONFIG_FILE" "$URI" "$TAG" "$SRC_DIR"
+
+check_mode "$SRC_DIR" "$MODE"
+
+if ! UIDS=$(ubuild-check-tag $CONFIG_ARG "$CONFIGURATION" "$SRC_DIR" "$TAG"); then
+    exit 1
+fi
+
+SRC_NAME=$(changelog_last_field "$SRC_DIR" Source)
+SRC_VERSION=$(changelog_last_field "$SRC_DIR" Version)
+SRC_SUITE=$(changelog_last_field "$SRC_DIR" Distribution)
+SRC_MAINTAINER=$(changelog_last_field "$SRC_DIR" Maintainer)
+
+#
+# Sanity checks
+#
+
+if [ "$PACKAGE" != "$SRC_NAME" ]; then
+    echo "Repository name ($PACKAGE) != source package name ($SRC_NAME)."
+    exit 1
+fi
+
+if [ "$VERSION" != "$SRC_VERSION" ]; then
+    echo "Tagged version ($VERSION) != source package version ($SRC_VERSION)."
+    exit 1
+fi
+
+if [ "$SUITE" != "$SRC_SUITE" ]; then
+    echo "Tagged suite ($SUITE) != source package suite ($SRC_SUITE)."
+    exit 1
+fi
+
+if ! in_line_list "$UIDS" "$SRC_MAINTAINER"; then
+    echo "Source package maintainer ($SRC_MAINTAINER) is not amongst the tagger uids:\n$UIDS\n"
+    exit 1
+fi
+
+ubuild2 $CONFIG_ARG $BINARY_ONLY "$CONFIGURATION" "$SRC_DIR" "$MODE" "$OUT_DIR"

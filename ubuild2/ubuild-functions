@@ -1,0 +1,179 @@
+# -*- mode:sh -*-
+
+set -x
+
+[ -n "$UBUILD_WORK_DIR" ] || (echo "No work directory specified" && exit 1)
+
+_workdir_clean() {
+    RET=$?
+    cd / # Stop using $_BUILDPLACE ourselves
+    sudo umount "$_BUILDPLACE"
+    rm -rf "$_BUILDPLACE"
+    return $RET
+}
+_workdir() {
+    _BUILDPLACE=$(mktemp -d -p "$UBUILD_WORK_DIR" builddir.XXXXXXXXXX)
+    export _BUILDPLACE
+    sudo mount -t tmpfs -o size=32G tmpfs "$_BUILDPLACE"
+    trap _workdir_clean 0 QUIT KILL TERM INT
+}
+
+BASE_TGZ="$UBUILD_WORK_DIR/$CONFIGURATION.tgz"
+
+_pbuilder_options() {
+    # Sigh. This is not overridable using command line options
+    if ! [ -f "$UBUILD_WORK_DIR/pbuilderrc" ]; then
+        echo APTCACHEHARDLINK=no > "$UBUILD_WORK_DIR/pbuilderrc"
+    fi
+    echo --configfile "$UBUILD_WORK_DIR/pbuilderrc"
+
+    # Some hooks
+    if ! [ -d "$UBUILD_WORK_DIR/hooks" ]; then
+        mkdir -p "$UBUILD_WORK_DIR/hooks"
+        cat <<EOF > "$UBUILD_WORK_DIR/hooks/D70update"
+#!/bin/sh
+/usr/bin/apt-get update
+/usr/bin/apt-get dist-upgrade --yes --force-yes
+EOF
+        chmod +x "$UBUILD_WORK_DIR/hooks/D70update"
+    fi
+    echo --hookdir "$UBUILD_WORK_DIR/hooks"
+
+    echo --aptcache "$UBUILD_WORK_DIR/cache"
+    echo --buildplace "$_BUILDPLACE"
+    echo --debootstrap debootstrap
+    echo --basetgz "$BASE_TGZ"
+    echo --mirror $DEBIAN_MIRROR
+    echo --distribution $DEBIAN_SUITE
+    if ! [ -z "$BUILD_ARCH" ]; then
+        echo --debootstrapopts --arch=$BUILD_ARCH
+    fi
+}
+
+_prepare_basetgz() {
+    TS_FILE="$UBUILD_WORK_DIR/$CONFIGURATION.tgz.timestamp"
+    if ! [ -e "$BASE_TGZ" ]; then
+        if sudo pbuilder --create $(_pbuilder_options) \
+            "$USE_OTHERMIRRORS" "$OTHER_MIRRORS"; then
+            date +%s > $TS_FILE
+        else
+            RET=$?
+            rm -f "$BASE_TGZ"
+            return $?
+        fi
+    else
+        if [ -f $TS_FILE ]; then
+            TS=$(cat $TS_FILE)
+            CURTIME=$(date +%s)
+
+            VAL=$(expr '(' "$TS" '+' '(' "$BASETGZ_UPDATE_TIMEOUT" '*' 86400 ')' ')' '<' "$CURTIME" ||:)
+            if [ $VAL -eq 0 ]; then
+                # Okay, the tgz is fresh enough
+                return 0
+            fi
+        fi
+            
+        if sudo pbuilder --update \
+            $(_pbuilder_options) \
+            --override-config \
+            "$USE_OTHERMIRRORS" "$OTHER_MIRRORS"; then
+            date +%s > $TS_FILE
+        else
+            return $?
+        fi
+    fi
+}
+
+_build() {
+    if [ "x$1" = "x-B" ]; then
+        BINARY_ARCH=--binary-arch
+        shift
+    fi
+
+    PACKAGE_DIR="$1"
+    TARGET_DIR="$2"
+    TARGET_ARCH="$3"
+
+    if [ -n "$TARGET_ARCH" ]; then
+        USE_TARGET_ARCH="--target-arch"
+    fi
+
+    cd "$PACKAGE_DIR"
+
+    # Avoid building arch-indep packages with -B
+    if [ -n "$BINARY_ARCH" ]; then
+        if [ 0 -eq $(awk '$1 ~ /Architecture:/ && $2 !~ /all/ { print $2 }' < debian/control | wc -l) ]; then
+            echo "Skipping arch-indep package: -B supplied"
+            return
+        fi
+    fi
+
+    if [ -n "$TARGET_ARCH" ]; then
+        CHANGES_ARCH=$TARGET_ARCH
+    elif [ -n "$BUILD_ARCH" ]; then
+        CHANGES_ARCH=$BUILD_ARCH
+    else
+        CHANGES_ARCH=$(dpkg-architecture -qDEB_BUILD_ARCH)
+    fi
+
+    PKG_SOURCENAME=$(dpkg-parsechangelog|sed -n 's/^Source: //p')
+    PKG_VERSION=$(dpkg-parsechangelog|sed -n 's/Version: \(.*:\|\)//p')
+    CHANGES="${PKG_SOURCENAME}_${PKG_VERSION}_$CHANGES_ARCH.changes"
+    DSC="${PKG_SOURCENAME}_${PKG_VERSION}.dsc"
+    LOG="${PKG_SOURCENAME}_${PKG_VERSION}_$BUILD_ARCH.log"
+
+    cd "$_BUILDPLACE"
+    dpkg-source -I.git -b "$PACKAGE_DIR"
+
+    export DEB_BUILD_OPTIONS=parallel=8
+
+    sudo pbuilder --build \
+        --buildresult "$_BUILDPLACE" \
+        --debbuildopts -b \
+        --logfile "$_BUILDPLACE/$LOG" \
+        $(_pbuilder_options) \
+        --override-config \
+        "$USE_OTHERMIRRORS" "$OTHER_MIRRORS" \
+        $USE_TARGET_ARCH $TARGET_ARCH \
+        $BINARY_ARCH \
+        "$_BUILDPLACE/$DSC"
+    RET=$?
+    if [ $RET -ne 0 ]; then
+        echo $RET
+        exit $RET
+    fi
+
+    # unicross $BINARY_ARCH "$_BUILDPLACE/$CHANGES"
+
+    debsign -pgpg -k"$SIGN_KEY" "$_BUILDPLACE/$CHANGES"
+
+    dcmd cp "$_BUILDPLACE/$CHANGES" "$TARGET_DIR"
+}
+
+#
+# This function expects the following variables to be set:
+#
+# CONFIGURATION - name of current configuration.
+# BUILD_ARCH - build architecture. Need to be compatible with host architecture.
+# SIGN_KEY - ID of key to sign built packages with.
+# DEBIAN_SUITE - Debian suite to use.
+# DEBIAN_MIRROR - URL of Debian mirror to use.  | if mirror starts with file:///,
+# OTHER_MIRRORS - URLs of other mirrors to use, | it will be bind-mounted.
+#                 separated by '|'
+#
+# todo: PBUILDER - use instead of pbuilder(1) to build. E.g.: toolchain
+#
+
+# pbuildit [-b] <package dir> <target dir> [<target architecture>]
+pbuildit() {
+
+    # :-|
+    if ! [ -z "$OTHER_MIRRORS" ]; then
+        USE_OTHERMIRRORS=--othermirror
+        export USE_OTHERMIRRORS
+    fi
+
+    _workdir || exit 1
+    _prepare_basetgz || exit 1
+    _build "$@" || exit 1
+}

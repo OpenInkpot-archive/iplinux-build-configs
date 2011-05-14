@@ -1,0 +1,19 @@
+#!/usr/bin/python
+
+from os import chdir
+from subprocess import check_call
+import sys
+from debian_bundle.deb822 import Changes
+from path import path
+
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        sys.stderr.write('unicross: incorrect number of arguments\n')
+        sys.exit(1)
+    arch = sys.argv[1]
+    changes_file = path(sys.argv[2]).abspath()
+
+    chdir(changes_file.parent)
+    for fi in Changes(file(changes_file))['Files']:
+        if fi['name'].endswith('.deb') and not fi['section'].startswith('host/'):
+            check_call(['dpkg-cross', '-A', '-a', arch, '-b', fi['name']])

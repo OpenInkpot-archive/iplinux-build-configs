@@ -1,0 +1,86 @@
+#!/bin/sh
+set -e
+
+usage() {
+    echo "ubuild-toolchain [--config-file=<config>] [-Bhost] [-Btarget] <configuration> <updated-package> <version> <target-arch>"
+    
+}
+
+while true; do
+    case "$1" in
+        --config-file=*)
+            CONFIG_ARG=$1
+            CONFIG_FILE=${CONFIG_ARG#--config-file=}
+            shift;;
+        -Bhost|-Btarget)
+            OPTIONS="$OPTIONS $1"
+            if [ "x$1" = "x-Bhost" ]; then
+                HOST_ARCH_ONLY=1
+            fi
+            shift;;
+        -*)
+            echo "Unknown option: $1"
+            exit 1;;
+        *)
+            break;;
+    esac
+done
+
+if [ $# -ne 4 ]; then
+    usage
+    exit 1
+fi
+
+CONFIGURATION="$1"
+PACKAGE="$2"
+VERSION="$3"
+ARCH="$4"
+
+SUITE=$(echo $CONFIGURATION | cut -d- -f3-)
+HOST_ARCH=$(echo $CONFIGURATION | cut -d- -f2)
+
+if [ -n "$CONFIG_FILE" ]; then
+    . $CONFIG_FILE
+else
+    [ -f ubuild.conf ] && . ./ubuild.conf && PATH=$(pwd):$PATH || [ -f /etc/ubuild/ubuild.conf ] && PATH=/etc/ubuild:$PATH || (echo "No config found"; exit 1)
+fi
+
+OUT_DIR=$HOME/__build/repo
+
+TMPDIR=$(mktemp -d -p $(pwd))
+cleanup() {
+    RET=$?
+    rm -rf "$TMPDIR"
+    return $RET
+}
+#trap cleanup 0 QUIT TERM
+
+go() {
+    for pkg in binutils-host linux-libc-dev uclibc glibc gcc-4.3; do
+        URI="$GIT_BASE$pkg$GIT_SUFFIX"
+        TAG="$SUITE/$VERSION"
+
+
+        if [ $pkg = $PACKAGE ]; then
+            ubuild-git-checkout --config-file=$CONFIG_FILE $URI $TAG $TMPDIR/$pkg
+        else
+            # Check out no matter what
+            if [ $pkg = glibc -o $pkg = gcc-4.3 ]; then
+                ubuild-git-checkout --config-file=$CONFIG_FILE $URI HEAD $TMPDIR/$pkg
+            fi
+        fi
+    done
+
+    mktpkg $OPTIONS --new=$PACKAGE --host-arch=$HOST_ARCH $ARCH
+
+    if [ -n "$HOST_ARCH_ONLY" ]; then
+        dcmd rm $OUT_DIR/glibc*.changes
+    fi
+
+    for c in $OUT_DIR/*.changes; do
+        debsign -pgpg -k"$SIGN_KEY" $c
+        dcmd cp $c $RESULTS_DIR
+    done
+}
+
+(cd $TMPDIR; go)

@@ -1,0 +1,83 @@
+#!/bin/sh
+set -e
+
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <config> <task file>"
+    exit 1
+fi
+
+LOCALFILE="$2"
+
+task_f() {
+    cat "$LOCALFILE" | awk '{ print $'$1'}'
+}
+
+CONF=$(task_f 2)
+PACKAGE=$(task_f 3)
+VERSION=$(task_f 4)
+PKGTYPE=$(task_f 5)
+REPO=$(echo $CONF | sed 's/-/ /g' | awk '{print $1}')
+SUITE=$(echo $CONF | sed 's/-/ /g' | awk '{print $2}')
+
+# HACK: double openinkpot-asimov, not a triple, like openinkpot-i386-asimov
+CONFIGURATION=$CONF
+. $1
+
+SUBMITTER=$(task_f 1)"$USERS_DOMAIN"
+
+buildtask() {
+    echo "Incoming: $LOCALFILE"
+    set -x
+
+    if [ $PACKAGE = 'gcc-4.3' ]; then
+    # if [ $PACKAGE = 'binutils-host' ] \
+    #     || [ $PACKAGE = 'linux-libc-dev' ] \
+    #     || [ $PACKAGE = 'gcc-4.3' ] \
+    #     || [ $PACKAGE = 'glibc' ] \
+    #     || [ $PACKAGE = 'uclibc' ]; then
+        for harch in $HOST_ARCHS; do
+            for tarch in $TARGET_ARCHS; do
+                if [ $harch != $MAIN_HOST_ARCH ]; then
+                    H_BINARY_ONLY=-Bhost
+                fi
+                if [ $tarch != $MAIN_TARGET_ARCH ]; then
+                    T_BINARY_ONLY=-Btarget
+                fi
+
+                ubuild-toolchain --config-file=$1 $H_BINARY_ONLY $T_BINARY_ONLY \
+                    "$REPO-$harch-$SUITE" "$PACKAGE" "$VERSION" "$tarch"
+                # BUILD IT
+            done
+        done
+    elif [ $PKGTYPE = host ]; then
+        for arch in $HOST_ARCHS; do
+            if [ $arch = $MAIN_HOST_ARCH ]; then
+                BINARY_ONLY=
+            else
+                BINARY_ONLY=-B
+            fi
+            ubuild-git --config-file=$1 $BINARY_ONLY "$RESULTS_DIR" "$REPO-$arch-$SUITE" \
+                "$PACKAGE" "$VERSION" host
+        done
+    else
+        for arch in $TARGET_ARCHS; do
+            if [ $arch = $MAIN_TARGET_ARCH ]; then
+                BINARY_ONLY=
+            else
+                BINARY_ONLY=-B
+            fi
+            ubuild-git --config-file=$1 $BINARY_ONLY "$RESULTS_DIR" "$REPO-${TARGET_BUILD_ARCH}-$SUITE" \
+                "$PACKAGE" "$VERSION" "target:$arch"
+        done
+    fi
+
+    rm -f $LOCALFILE
+}
+
+if OUT=$(buildtask "$@" 2>&1); then
+    SUBJ="[$PREFIX] $LOCALFILE -> $REMOTEHOST"
+else
+    SUBJ="[${PREFIX}:FAIL] $LOCALFILE-> $REMOTEHOST"
+fi
+
+echo "$OUT" | mail -a "From: $FROM_MAIL" -c "$SUBMITTER" -s "$SUBJ" $TO_MAIL
